@@ -1,0 +1,119 @@
+---
+name: Deploy to cPanel
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+# Avoid overlapping deploys
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REPO_PATH: /home/sites/18a/e/e47a2b1493/public_html/outlawnebula
+  BRANCH: main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Show commit
+        run: |
+          echo "Ref:     $GITHUB_REF"
+          echo "SHA:     $GITHUB_SHA"
+          echo "Actor:   $GITHUB_ACTOR"
+          echo "Message: ${{ github.event.head_commit.message || 'manual dispatch' }}"
+
+      - name: Add host key (known_hosts)
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.SSH_PORT || '22' }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy over SSH (pull on server)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || '22' }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            REPO_PATH="${{ env.REPO_PATH }}"
+            BRANCH="${{ env.BRANCH }}"
+            LOG_DIR="$REPO_PATH/.deploy-logs"
+            LOG_FILE="$LOG_DIR/$(date +'%Y%m%d-%H%M%S').log"
+
+            mkdir -p "$LOG_DIR"
+            exec > >(tee -a "$LOG_FILE") 2>&1
+
+            echo "=== Deploy started: $(date -Is) ==="
+            echo "Repo path: $REPO_PATH"
+            echo "Branch:    $BRANCH"
+            echo "From SHA:  $GITHUB_SHA"
+
+            cd "$REPO_PATH"
+
+            # Use whichever git is available (cPanel path or PATH)
+            if command -v /usr/local/cpanel/3rdparty/bin/git >/dev/null 2>&1; then
+              GIT_BIN=/usr/local/cpanel/3rdparty/bin/git
+            else
+              GIT_BIN=$(command -v git)
+            fi
+
+            "$GIT_BIN" fetch --all --prune
+            "$GIT_BIN" checkout "$BRANCH"
+            "$GIT_BIN" reset --hard "origin/$BRANCH"
+            "$GIT_BIN" submodule update --init --recursive
+
+            # Optional: PHP lint
+            if command -v php >/dev/null 2>&1; then
+              echo "PHP lint…"
+              find "$REPO_PATH" -type f -name "*.php" -print0 | xargs -0 -r -n1 php -l >/dev/null
+            fi
+
+            # Optional: Composer
+            if [ -f "$REPO_PATH/composer.json" ]; then
+              echo "Composer install…"
+              if command -v composer >/dev/null 2>&1; then
+                composer -d "$REPO_PATH" install --no-dev --optimize-autoloader --no-interaction
+              elif [ -x "$HOME/bin/composer" ]; then
+                "$HOME/bin/composer" -d "$REPO_PATH" install --no-dev --optimize-autoloader --no-interaction
+              else
+                echo "Composer not found; skipping."
+              fi
+            fi
+
+            # Optional: Node build
+            if [ -f "$REPO_PATH/package.json" ] && command -v npm >/dev/null 2>&1; then
+              echo "Node build…"
+              cd "$REPO_PATH"
+              if [ -f package-lock.json ]; then
+                npm ci
+              else
+                npm install
+              fi
+              if npm run | grep -q " build"; then
+                npm run build
+              fi
+            fi
+
+            # Permissions
+            echo "Fixing permissions…"
+            find "$REPO_PATH" -type d -exec chmod 755 {} \;
+            find "$REPO_PATH" -type f -exec chmod 644 {} \;
+
+            # Deployment marker
+            echo "Deployed: $(date -Is)" > "$REPO_PATH/deploy.txt"
+            "$GIT_BIN" rev-parse HEAD >> "$REPO_PATH/deploy.txt"
+
+            echo "=== Deploy finished: $(date -Is) ==="
+            echo "Log: $LOG_FILE"
