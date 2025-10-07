@@ -103,9 +103,9 @@
               loading="lazy"
             />
           </figure>
-          <h1>Outlaw Nebula</h1>
+          <!-- <h1>Subscribe</h1>
           <p class="subtitle">The frontier of creativity, technology, and imagination.</p>
-          <p class="subtitle"><em>Coming Soon</em></p>
+          <p class="subtitle"><em>Coming Soon</em></p> -->
         </div>
       </div>
     </section>
